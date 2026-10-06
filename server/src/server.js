@@ -42,21 +42,21 @@ app.get("/api/users/drivers",auth,role("admin"),async(req,res)=>res.json({users:
 app.patch("/api/users/:id/status",auth,role("admin"),async(req,res)=>{
   const u=await User.findById(req.params.id);
   if(!u)return res.status(404).json({message:"User not found"});
-  if(u.role==="admin"||u.isPrimaryAdmin)return res.status(403).json({message:"Admin accounts are protected and cannot be suspended"});
+  if(String(u._id)===String(req.user._id)||u.isPrimaryAdmin)return res.status(403).json({message:"You cannot suspend the admin account you are currently using"});
   if(!["active","suspended"].includes(req.body.status))return res.status(400).json({message:"Invalid account status"});
   u.status=req.body.status;await u.save();res.json({user:publicUser(u)});
 });
 app.patch("/api/users/:id/role",auth,role("admin"),async(req,res)=>{
   const u=await User.findById(req.params.id);
   if(!u)return res.status(404).json({message:"User not found"});
-  if(u.role==="admin"||u.isPrimaryAdmin)return res.status(403).json({message:"Admin accounts are protected and cannot be changed here"});
+  if(String(u._id)===String(req.user._id)||u.isPrimaryAdmin)return res.status(403).json({message:"You cannot change the admin account you are currently using"});
   if(!["customer","driver","admin"].includes(req.body.role))return res.status(400).json({message:"Invalid role"});
   u.role=req.body.role;u.status="active";await u.save();res.json({user:publicUser(u)});
 });
 app.delete("/api/users/:id",auth,role("admin"),async(req,res)=>{
   const u=await User.findById(req.params.id);
   if(!u)return res.status(404).json({message:"User not found"});
-  if(String(u._id)===String(req.user._id))return res.status(403).json({message:"You cannot delete the admin account you are currently using"});  if(u.role==="admin"||u.isPrimaryAdmin)return res.status(403).json({message:"Admin accounts are protected and cannot be deleted"});
+  if(String(u._id)===String(req.user._id))return res.status(403).json({message:"You cannot delete the admin account you are currently using"});  if(u.isPrimaryAdmin)return res.status(403).json({message:"The primary admin cannot be deleted"});
   if(u.role==="customer"){await Shipment.updateMany({customerId:u._id},{$set:{customerId:null}});}if(u.role==="driver"){await DriverLocation.deleteOne({driverId:u._id});await Shipment.updateMany({driverId:u._id,status:{$nin:["Delivered","Cancelled","Failed Delivery"]}},{$set:{driverId:null,status:"Pending"}});await Shipment.updateMany({driverId:u._id},{$set:{driverId:null}});await ClaimRequest.updateMany({driverId:u._id},{$set:{status:"rejected",handledAt:new Date()}});}
   await User.deleteOne({_id:u._id});res.json({message:"User deleted"});
 });
