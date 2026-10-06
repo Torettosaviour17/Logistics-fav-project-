@@ -56,7 +56,7 @@ app.patch("/api/users/:id/role",auth,role("admin"),async(req,res)=>{
 app.delete("/api/users/:id",auth,role("admin"),async(req,res)=>{
   const u=await User.findById(req.params.id);
   if(!u)return res.status(404).json({message:"User not found"});
-  if(u.isPrimaryAdmin)return res.status(403).json({message:"The primary admin cannot be deleted"});
+  if(String(u._id)===String(req.user._id))return res.status(403).json({message:"You cannot delete the admin account you are currently using"});  if(u.isPrimaryAdmin)return res.status(403).json({message:"The primary admin cannot be deleted"});
   if(u.role==="customer"){const ss=await Shipment.find({customerId:u._id}).select("_id"),ids=ss.map(x=>x._id);if(ids.length){await History.deleteMany({shipmentId:{$in:ids}});await Location.deleteMany({shipmentId:{$in:ids}});await ClaimRequest.deleteMany({shipmentId:{$in:ids}});await Shipment.deleteMany({_id:{$in:ids}});}}if(u.role==="driver"){await DriverLocation.deleteOne({driverId:u._id});await Shipment.updateMany({driverId:u._id},{$set:{driverId:null,status:"Pending"}});await ClaimRequest.updateMany({driverId:u._id},{$set:{status:"rejected",handledAt:new Date()}});}
   await User.deleteOne({_id:u._id});res.json({message:"User deleted"});
 });
