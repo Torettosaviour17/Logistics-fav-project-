@@ -24,6 +24,17 @@ jobs:
         working-directory: client
         run: npm install
 
+      - name: Wait for live frontend
+        env:
+          BASE_URL: https://logisticsfav-web-app.onrender.com
+        run: |
+          for i in {1..24}; do
+            if curl -fsS "$BASE_URL" >/dev/null; then exit 0; fi
+            sleep 5
+          done
+          echo "Frontend did not become reachable in time"
+          exit 1
+
       - name: Install Playwright browsers
         working-directory: client
         run: npx playwright install --with-deps chromium
