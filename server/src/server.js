@@ -7,7 +7,7 @@ const Location=mongoose.model("Location",new mongoose.Schema({shipmentId:mongoos
 const ClaimRequest=mongoose.model("ClaimRequest",new mongoose.Schema({shipmentId:{type:mongoose.Schema.Types.ObjectId,ref:"Shipment",required:true},driverId:{type:mongoose.Schema.Types.ObjectId,ref:"User",required:true},status:{type:String,enum:["pending","approved","rejected"],default:"approved"},createdAt:{type:Date,default:Date.now},handledAt:Date}));
 const publicUser=u=>({id:u._id,name:u.name,email:u.email,role:u.role,status:u.status,isPrimaryAdmin:!!u.isPrimaryAdmin,isTestUser:!!u.isTestUser,phone:u.phone});const sign=u=>jwt.sign({userId:u._id.toString()},process.env.JWT_SECRET,{expiresIn:"7d"});const auth=async(req,res,next)=>{try{const h=req.headers.authorization||"";if(!h.startsWith("Bearer "))throw Error();const p=jwt.verify(h.slice(7),process.env.JWT_SECRET);req.user=await User.findById(p.userId).select("-passwordHash");if(!req.user)throw Error();if(req.user.status==="suspended")return res.status(403).json({message:"This account is suspended"});next()}catch{res.status(401).json({message:"Authentication required"})}};const role=(...r)=>(req,res,next)=>r.includes(req.user.role)?next():res.status(403).json({message:"Forbidden"});
 app.get("/api/health",(req,res)=>res.json({status:"ok"}));
-app.post("/api/auth/register",async(req,res)=>{try{const{name,email,password,phone,role:requestedRole}=req.body;if(!name||!email||!password)return res.status(400).json({message:"Name, email and password are required"});if(password.length<8)return res.status(400).json({message:"Password must be at least 8 characters"});if(await User.exists({email}))return res.status(409).json({message:"Email already registered"});const role=requestedRole==="driver"?"driver":"customer";const u=await User.create({name,email,passwordHash:await bcrypt.hash(password,12),phone,role,status:"active"});res.status(201).json({token:sign(u),user:publicUser(u)})}catch(e){res.status(400).json({message:e.message})}});
+app.post("/api/auth/register",async(req,res)=>{try{const{name,email,password,phone,role:requestedRole}=req.body;const testText=(String(name||"")+" "+String(email||"")).toLowerCase();const isTestUser=/test|demo|dummy|sandbox|qa|playweek/.test(testText);if(!name||!email||!password)return res.status(400).json({message:"Name, email and password are required"});if(password.length<8)return res.status(400).json({message:"Password must be at least 8 characters"});if(await User.exists({email}))return res.status(409).json({message:"Email already registered"});const role=requestedRole==="driver"?"driver":"customer";const u=await User.create({name,email,passwordHash:await bcrypt.hash(password,12),phone,role,status:"active",isTestUser});res.status(201).json({token:sign(u),user:publicUser(u)})}catch(e){res.status(400).json({message:e.message})}});
 app.post("/api/auth/login",async(req,res)=>{const email=String(req.body.email||"").trim().toLowerCase();const u=await User.findOne({email});if(!u||!(await bcrypt.compare(req.body.password||"",u.passwordHash)))return res.status(401).json({message:"Invalid email or password"});if(u.status==="suspended")return res.status(403).json({message:"This account is suspended"});res.json({token:sign(u),user:publicUser(u)})});
 app.get("/api/auth/me",auth,(req,res)=>res.json({user:publicUser(req.user)}));
 const tracking=()=> "LF-"+new Date().getFullYear()+"-"+crypto.randomBytes(4).toString("hex").toUpperCase();
@@ -142,16 +142,19 @@ app.post("/api/shipments/:id/confirm-delivery",auth,role("customer"),async(req,r
 });
 app.patch("/api/shipments/:id/status",auth,role("driver","admin"),async(req,res)=>{const s=await Shipment.findById(req.params.id);if(!s)return res.status(404).json({message:"Shipment not found"});if(req.user.role==="driver"&&String(s.driverId)!==String(req.user._id))return res.status(403).json({message:"Only the assigned driver can update this shipment"});if(!next[s.status]?.includes(req.body.status))return res.status(400).json({message:"Invalid status transition"});s.status=req.body.status;s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:req.body.note||"Status updated",changedBy:req.user._id});res.json({shipment:s})});
 app.post("/api/admin/cleanup",auth,role("admin"),async(req,res)=>{
-  try{res.json({message:"Database cleanup complete",cleanup:await cleanupOrphanedData()})}
+  try{
+    await isolateObviousTestUsers();
+    const testUsers=await enforceTestUserLimit();
+    res.json({message:"Database cleanup complete",cleanup:await cleanupOrphanedData(),testUsers})}
   catch(e){res.status(500).json({message:"Database cleanup failed",error:e.message})}
 });
 app.get("/api/claims",auth,role("admin"),async(req,res)=>{const claims=await ClaimRequest.find({}).populate("driverId","name email phone isTestUser").populate({path:"shipmentId",populate:[{path:"customerId",select:"name email isTestUser"},{path:"driverId",select:"name email isTestUser"}]}).sort({createdAt:-1});const visible=claims.filter(c=>!c.driverId?.isTestUser&&!c.shipmentId?.customerId?.isTestUser&&!c.shipmentId?.driverId?.isTestUser);res.json({claims:visible})});
-app.patch("/api/shipments/:id/assign",auth,role("admin"),async(req,res)=>{const s=await Shipment.findById(req.params.id);if(!s)return res.status(404).json({message:"Shipment not found"});if(!req.body.driverId){s.driverId=null;if(["Assigned","Picked Up"].includes(s.status))s.status="Pending";s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:"Driver unassigned by admin",changedBy:req.user._id});return res.json({shipment:s,message:"Driver unassigned"})}const d=await User.findOne({_id:req.body.driverId,role:"driver",status:"active"});if(!d)return res.status(404).json({message:"Active driver not found"});s.driverId=d._id;if(s.status==="Pending")s.status="Assigned";s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:"Driver assigned by admin",changedBy:req.user._id});res.json({shipment:s,message:"Driver assigned"})});
-app.get("/api/users/:id/shipments",auth,role("admin"),async(req,res)=>{const u=await User.findById(req.params.id).select("name email role status");if(!u)return res.status(404).json({message:"User not found"});const filter=u.role==="driver"?{driverId:u._id}:{customerId:u._id};res.json({user:u,shipments:await Shipment.find(filter).populate("customerId","name email").populate("driverId","name email").sort({createdAt:-1})});});app.get("/api/users",auth,role("admin"),async(req,res)=>{
+app.patch("/api/shipments/:id/assign",auth,role("admin"),async(req,res)=>{const s=await Shipment.findById(req.params.id);if(!s)return res.status(404).json({message:"Shipment not found"});if(!req.body.driverId){s.driverId=null;if(["Assigned","Picked Up"].includes(s.status))s.status="Pending";s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:"Driver unassigned by admin",changedBy:req.user._id});return res.json({shipment:s,message:"Driver unassigned"})}const d=await User.findOne({_id:req.body.driverId,role:"driver",status:"active",isTestUser:{$ne:true}});if(!d)return res.status(404).json({message:"Active driver not found"});s.driverId=d._id;if(s.status==="Pending")s.status="Assigned";s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:"Driver assigned by admin",changedBy:req.user._id});res.json({shipment:s,message:"Driver assigned"})});
+app.get("/api/users/:id/shipments",auth,role("admin"),async(req,res)=>{const u=await User.findById(req.params.id).select("name email role status isTestUser");if(!u||u.isTestUser)return res.status(404).json({message:"User not found"});const filter=u.role==="driver"?{driverId:u._id}:{customerId:u._id};res.json({user:u,shipments:await Shipment.find(filter).populate("customerId","name email").populate("driverId","name email").sort({createdAt:-1})});});app.get("/api/users",auth,role("admin"),async(req,res)=>{
   const includeTest=req.query.includeTest==="true";const users=await User.find(includeTest?{}:{isTestUser:{$ne:true}}).select("name email phone role status isPrimaryAdmin isTestUser createdAt").sort({createdAt:1});
   res.json({users});
 });
-app.get("/api/users/drivers",auth,role("admin"),async(req,res)=>res.json({users:await User.find({role:"driver"}).select("name email phone role status isPrimaryAdmin createdAt").sort({createdAt:1})}));
+app.get("/api/users/drivers",auth,role("admin"),async(req,res)=>res.json({users:await User.find({role:"driver",isTestUser:{$ne:true}}).select("name email phone role status isPrimaryAdmin createdAt").sort({createdAt:1})}));
 app.patch("/api/users/:id/status",auth,role("admin"),async(req,res)=>{
   const u=await User.findById(req.params.id);
   if(!u)return res.status(404).json({message:"User not found"});
@@ -173,11 +176,37 @@ app.patch("/api/users/:id/test",auth,role("admin"),async(req,res)=>{const u=awai
   const deletedShipments=await deleteShipmentsForUser(u._id);await Promise.all([DriverLocation.deleteOne({driverId:u._id}),ClaimRequest.deleteMany({driverId:u._id}),User.deleteOne({_id:u._id})]);res.json({message:"User deleted",deletedShipments});
 });
 app.post("/api/drivers/location",auth,role("driver"),async(req,res)=>{const {latitude,longitude,accuracy,speed}=req.body;if(!Number.isFinite(Number(latitude))||!Number.isFinite(Number(longitude)))return res.status(400).json({message:"Valid location is required"});const now=new Date(),lat=Number(latitude),lng=Number(longitude);const gps=await DriverLocation.findOneAndUpdate({driverId:req.user._id},{driverId:req.user._id,latitude:lat,longitude:lng,accuracy:Number(accuracy)||undefined,speed:Number(speed)||undefined,recordedAt:now},{upsert:true,new:true,setDefaultsOnInsert:true});const assigned=await Shipment.find({driverId:req.user._id,status:{$nin:["Delivered","Cancelled","Failed Delivery"]}}).select("_id");await Promise.all(assigned.map(x=>Location.findOneAndUpdate({shipmentId:x._id},{shipmentId:x._id,driverId:req.user._id,latitude:lat,longitude:lng,accuracy:Number(accuracy)||undefined,speed:Number(speed)||undefined,recordedAt:now},{upsert:true,new:true,setDefaultsOnInsert:true})));res.json({location:gps})});app.post("/api/shipments/:id/location",auth,role("driver"),async(req,res)=>{const s=await Shipment.findById(req.params.id);if(!s||String(s.driverId)!==String(req.user._id))return res.status(403).json({message:"Forbidden"});const l=await Location.findOneAndUpdate({shipmentId:s._id},{shipmentId:s._id,driverId:req.user._id,latitude:req.body.latitude,longitude:req.body.longitude,recordedAt:new Date()},{upsert:true,new:true,setDefaultsOnInsert:true});res.status(201).json({location:l})});
-app.get("/api/track/:trackingNumber",async(req,res)=>{const s=await Shipment.findOne({trackingNumber:req.params.trackingNumber}).populate("driverId","name");if(!s)return res.status(404).json({message:"Shipment not found"});res.json({shipment:{...s.toObject(),statusHistory:await History.find({shipmentId:s._id}).sort({createdAt:1}),latestLocation:await Location.findOne({shipmentId:s._id}).sort({recordedAt:-1})}})});
+app.get("/api/track/:trackingNumber",async(req,res)=>{const s=await Shipment.findOne({trackingNumber:req.params.trackingNumber}).populate("customerId","name email isTestUser").populate("driverId","name isTestUser");if(!s)return res.status(404).json({message:"Shipment not found"});if(s.customerId?.isTestUser||s.driverId?.isTestUser)return res.status(404).json({message:"Shipment not found"});res.json({shipment:{...s.toObject(),statusHistory:await History.find({shipmentId:s._id}).sort({createdAt:1}),latestLocation:await Location.findOne({shipmentId:s._id}).sort({recordedAt:-1})}})});
 app.use((req,res)=>res.status(404).json({message:"Route not found"}));
 app.get("/",(req,res)=>res.json({name:"LogisticsFav API",status:"ok",health:"/api/health"}));
 const port=process.env.PORT||5000;
-async function isolateObviousTestUsers(){const candidates=await User.find({isTestUser:{$ne:true}}).select("_id name email isPrimaryAdmin");const ids=candidates.filter(u=>{if(u.isPrimaryAdmin)return false;const v=(String(u.name||"")+" "+String(u.email||"")).toLowerCase();return v.includes("test")||v.includes("demo")||v.includes("dummy")||v.includes("sandbox")||v.includes("qa");}).map(u=>u._id);if(ids.length)await User.updateMany({_id:{$in:ids}},{$set:{isTestUser:true}});}async function seedDemoUsers(){
+const MAX_TEST_USERS=5;
+const isTestNameOrEmail=(u)=>{
+  const v=(String(u.name||"")+" "+String(u.email||"")).toLowerCase();
+  return /test|demo|dummy|sandbox|qa|playweek/.test(v);
+};
+async function isolateObviousTestUsers(){
+  const candidates=await User.find({isTestUser:{$ne:true}}).select("_id name email isPrimaryAdmin");
+  const ids=candidates.filter(u=>!u.isPrimaryAdmin&&isTestNameOrEmail(u)).map(u=>u._id);
+  if(ids.length)await User.updateMany({_id:{$in:ids}},{$set:{isTestUser:true}});
+}
+async function enforceTestUserLimit(){
+  const testUsers=await User.find({isTestUser:true,isPrimaryAdmin:{$ne:true}}).sort({createdAt:1}).select("_id createdAt");
+  const excess=testUsers.length-MAX_TEST_USERS;
+  if(excess<=0)return {deletedTestUsers:0};
+  const oldest=testUsers.slice(0,excess);
+  let deletedShipments=0;
+  for(const u of oldest)deletedShipments+=await deleteShipmentsForUser(u._id);
+  await Promise.all([
+    DriverLocation.deleteMany({driverId:{$in:oldest.map(u=>u._id)}}),
+    ClaimRequest.deleteMany({driverId:{$in:oldest.map(u=>u._id)}}),
+    User.deleteMany({_id:{$in:oldest.map(u=>u._id)}})
+  ]);
+  const result={deletedTestUsers:oldest.length,deletedTestShipments:deletedShipments};
+  console.log("E-LOGS test-user rotation:",result);
+  return result;
+}
+async function seedDemoUsers(){
   // Keep exactly one controlled admin account in sync with the Render environment.
   // Driver accounts are created by users through registration, so there is no fixed demo driver.
   const email=(process.env.ADMIN_EMAIL||"").trim().toLowerCase();
@@ -196,8 +225,15 @@ async function start(){
   await mongoose.connect(process.env.MONGODB_URI);
   await seedDemoUsers();
   await isolateObviousTestUsers();
+  await enforceTestUserLimit();
   await cleanupOrphanedData();
-  setInterval(()=>cleanupOrphanedData().catch(e=>console.error("E-LOGS database cleanup failed:",e)),30000);
+  setInterval(async()=>{
+    try{
+      await isolateObviousTestUsers();
+      await enforceTestUserLimit();
+      await cleanupOrphanedData();
+    }catch(e){console.error("E-LOGS scheduled cleanup failed:",e)}
+  },30000);
   app.listen(port,()=>console.log("LogisticsFav API running on "+port));
 }
 start().catch(e=>{console.error("LogisticsFav startup failed:",e);process.exit(1)});
