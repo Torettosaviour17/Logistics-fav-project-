@@ -23,16 +23,17 @@ app.use((req,res)=>res.status(404).json({message:"Route not found"}));
 app.get("/",(req,res)=>res.json({name:"LogisticsFav API",status:"ok",health:"/api/health"}));
 const port=process.env.PORT||5000;
 async function seedDemoUsers(){
-  // Defense/demo convenience: create the configured admin and driver accounts if they do not exist.
-  const demoUsers=[
-    {email:process.env.ADMIN_EMAIL,password:process.env.ADMIN_PASSWORD,role:"admin",name:"LogisticsFav Admin"},
-    {email:process.env.DRIVER_EMAIL,password:process.env.DRIVER_PASSWORD,role:"driver",name:"Demo Driver"}
-  ];
-  for(const d of demoUsers){
-    if(!d.email||!d.password||d.password.startsWith("replace-with-")) continue;
-    const exists=await User.exists({email:d.email});
-    if(!exists) await User.create({name:d.name,email:d.email,passwordHash:await bcrypt.hash(d.password,12),role:d.role});
-  }
+  // Keep exactly one controlled admin account in sync with the Render environment.
+  // Driver accounts are created by users through registration, so there is no fixed demo driver.
+  const email=(process.env.ADMIN_EMAIL||"").trim().toLowerCase();
+  const password=process.env.ADMIN_PASSWORD||"";
+  if(!email||!password||password.startsWith("replace-with-")) return;
+  const passwordHash=await bcrypt.hash(password,12);
+  await User.findOneAndUpdate(
+    {email},
+    {name:"LogisticsFav Admin",email,passwordHash,role:"admin"},
+    {upsert:true,new:true,setDefaultsOnInsert:true}
+  );
 }
 async function start(){
   if(!process.env.MONGODB_URI) throw new Error("MONGODB_URI is required");
