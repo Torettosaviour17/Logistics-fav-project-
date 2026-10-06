@@ -1,5 +1,5 @@
 import{useEffect,useState}from"react";import{Link,useNavigate,useParams,useLocation,Routes,Route,Navigate}from"react-router-dom";import{Package,Truck,MapPin,ShieldCheck,Plus,Search,LogOut,ArrowRight,CheckCircle2,Clock3,Users,PackageCheck,Copy,ExternalLink,UserRound}from"lucide-react";
-const API=(import.meta.env.VITE_API_URL||"https://logisticsfav-api.onrender.com/api").replace(/\\/$/,"");
+const API=(import.meta.env.VITE_API_URL||"https://logisticsfav-api.onrender.com/api").replace(/\/$/,"");
 const token=()=>localStorage.getItem("logistics_token");
 const savedUser=()=>{try{return JSON.parse(localStorage.getItem("logistics_user")||"null")}catch{return null}};
 
