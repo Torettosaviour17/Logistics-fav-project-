@@ -1,7 +1,25 @@
 import{useEffect,useState}from"react";import{Link,useNavigate,useParams,useLocation,Routes,Route,Navigate}from"react-router-dom";import{Package,Truck,MapPin,ShieldCheck,Plus,Search,LogOut,ArrowRight,CheckCircle2,Clock3,Users,PackageCheck}from"lucide-react";
-const API=import.meta.env.VITE_API_URL||"/api";const token=()=>localStorage.getItem("logistics_token");
-async function api(path,opt={}){const r=await fetch(API+path,{...opt,headers:{"Content-Type":"application/json",...(token()?{Authorization:"Bearer "+token()}:{})}});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.message||"Request failed");return d}
-function useAuth(){const[user,setUser]=useState(null),[loading,setLoading]=useState(true);useEffect(()=>{if(!token())return setLoading(false);api("/auth/me").then(d=>setUser(d.user)).catch(()=>localStorage.removeItem("logistics_token")).finally(()=>setLoading(false))},[]);return{user,setUser,loading}}
+const API=(import.meta.env.VITE_API_URL||"/api").replace(/\\/$/,"");
+const token=()=>localStorage.getItem("logistics_token");
+// One API helper keeps local development and the hosted frontend pointed at the same backend.
+async function api(path,opt={}){
+  const r=await fetch(API+path,{...opt,headers:{"Content-Type":"application/json",...(token()?{Authorization:"Bearer "+token()}:{})}});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){const e=Error(d.message||"Request failed");e.status=r.status;throw e;}
+  return d;
+}
+function useAuth(){
+  const[user,setUser]=useState(null),[loading,setLoading]=useState(true);
+  useEffect(()=>{
+    const saved=token();
+    if(!saved){setLoading(false);return;}
+    // A refresh should restore the session. Only a real 401/403 invalidates the saved token.
+    api("/auth/me").then(d=>setUser(d.user)).catch(e=>{
+      if(e.status===401||e.status===403){localStorage.removeItem("logistics_token");setUser(null);}
+    }).finally(()=>setLoading(false));
+  },[]);
+  return{user,setUser,loading}
+}
 
 function ScrollToTop(){const{pathname}=useLocation();useEffect(()=>{window.scrollTo({top:0,left:0,behavior:"auto"})},[pathname]);return null}
 function NotFound(){return <main className="mx-auto grid min-h-[70vh] max-w-3xl place-items-center px-4 py-16 text-center"><div><p className="font-black tracking-widest text-teal-700">404</p><h1 className="mt-3 text-5xl font-black">Page not found</h1><p className="mt-4 text-slate-500">The page you are looking for does not exist, or the link has changed.</p><div className="mt-7 flex justify-center gap-3"><Link className="primary" to="/">Back home</Link><Link className="secondary" to="/track">Track a shipment</Link></div></div></main>}
