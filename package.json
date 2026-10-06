@@ -1,1 +1,15 @@
-{"name":"logistics-fav","private":true,"scripts":{"dev":"concurrently \"npm run server:dev\" \"npm run client:dev\"","server:dev":"npm --prefix server run dev","client:dev":"npm --prefix client run dev","build":"npm --prefix client run build","start":"npm --prefix server start"},"devDependencies":{"concurrently":"^9.1.2"}}
+{
+  "name": "logistics-fav",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
+    "server:dev": "npm --prefix server run dev",
+    "client:dev": "npm --prefix client run dev",
+    "build": "npm --prefix client run build",
+    "start": "npm --prefix server start",
+    "postinstall": "npm install --prefix server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
