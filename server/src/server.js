@@ -10,18 +10,68 @@ app.get("/api/health",(req,res)=>res.json({status:"ok"}));
 app.post("/api/auth/register",async(req,res)=>{try{const{name,email,password,phone,role:requestedRole}=req.body;if(!name||!email||!password)return res.status(400).json({message:"Name, email and password are required"});if(password.length<8)return res.status(400).json({message:"Password must be at least 8 characters"});if(await User.exists({email}))return res.status(409).json({message:"Email already registered"});const role=requestedRole==="driver"?"driver":"customer";const u=await User.create({name,email,passwordHash:await bcrypt.hash(password,12),phone,role,status:"active"});res.status(201).json({token:sign(u),user:publicUser(u)})}catch(e){res.status(400).json({message:e.message})}});
 app.post("/api/auth/login",async(req,res)=>{const email=String(req.body.email||"").trim().toLowerCase();const u=await User.findOne({email});if(!u||!(await bcrypt.compare(req.body.password||"",u.passwordHash)))return res.status(401).json({message:"Invalid email or password"});if(u.status==="suspended")return res.status(403).json({message:"This account is suspended"});res.json({token:sign(u),user:publicUser(u)})});
 app.get("/api/auth/me",auth,(req,res)=>res.json({user:publicUser(req.user)}));
-const tracking=()=> "LF-"+new Date().getFullYear()+"-"+crypto.randomBytes(4).toString("hex").toUpperCase();async function cleanupShipmentRecords(ids){if(!ids.length)return;await Promise.all([History.deleteMany({shipmentId:{$in:ids}}),Location.deleteMany({shipmentId:{$in:ids}}),ClaimRequest.deleteMany({shipmentId:{$in:ids}}),Shipment.deleteMany({_id:{$in:ids}})])}async function deleteShipmentsForUser(userId){const ids=(await Shipment.find({$or:[{customerId:userId},{driverId:userId}]}).select("_id")).map(x=>x._id);await cleanupShipmentRecords(ids);return ids.length}
-app.get("/api/shipments",auth,async(req,res)=>{let f=req.user.role==="customer"?{customerId:req.user._id}:req.user.role==="driver"?req.query.available==="true"?{driverId:null,status:"Pending"}:req.query.assigned==="true"?{driverId:req.user._id,status:{$nin:["Delivered","Cancelled","Failed Delivery"]}}:{driverId:req.user._id}:{};if(req.user.role==="admin"){const hidden=(await User.find({isTestUser:true}).select("_id")).map(x=>x._id);if(hidden.length)f={$and:[f,{$or:[{customerId:null},{customerId:{$nin:hidden}}]},{$or:[{driverId:null},{driverId:{$nin:hidden}}]}]}}res.json({shipments:await Shipment.find(f).populate("customerId","name email").populate("driverId","name email").sort({createdAt:-1})})});
-app.post("/api/shipments",auth,role("customer"),async(req,res)=>{try{const body={...req.body};const textFields=["senderName","pickupAddress","receiverName","destinationAddress","packageDescription","category","priority","notes"];for(const k of textFields)if(body[k]!=null)body[k]=String(body[k]).trim();for(const k of ["senderPhone","receiverPhone"])if(body[k]!=null)body[k]=String(body[k]).replace(/[^0-9+]/g,"");if(!["send_to_someone","order_for_myself"].includes(body.shipmentType))return res.status(400).json({message:"Choose whether this delivery is for someone else or for yourself"});if(!body.senderName||!body.senderPhone||!body.pickupAddress||!body.receiverName||!body.receiverPhone||!body.destinationAddress||!body.packageDescription||!body.category)return res.status(400).json({message:"Please complete all required delivery information"});if(body.weight!==""&&body.weight!=null){const n=Number(body.weight);if(!Number.isFinite(n)||n<0)return res.status(400).json({message:"Weight must be a valid number"});body.weight=n}else body.weight=null;let t=tracking();while(await Shipment.exists({trackingNumber:t}))t=tracking();const s=await Shipment.create({...body,customerId:req.user._id,trackingNumber:t,status:"Pending"});await History.create({shipmentId:s._id,status:"Pending",note:"Shipment created",changedBy:req.user._id});res.status(201).json({shipment:s})}catch(e){res.status(400).json({message:e.message})}});
-app.get("/api/shipments/:id",auth,async(req,res)=>{const s=await Shipment.findById(req.params.id).populate("customerId","name email phone").populate("driverId","name email phone");if(!s)return res.status(404).json({message:"Shipment not found"});if(req.user.role==="customer"&&s.customerId._id.toString()!==req.user._id.toString())return res.status(403).json({message:"Forbidden"});if(req.user.role==="driver"&&(!s.driverId||s.driverId._id.toString()!==req.user._id.toString()))return res.status(403).json({message:"Forbidden"});res.json({shipment:{...s.toObject(),statusHistory:await History.find({shipmentId:s._id}).sort({createdAt:1}),latestLocation:await Location.findOne({shipmentId:s._id}).sort({recordedAt:-1})}})});
-const next={Pending:["Assigned","Cancelled"],Assigned:["Picked Up","Cancelled"],"Picked Up":["In Transit"],"In Transit":["Out for Delivery","Failed Delivery"],"Out for Delivery":["Delivered","Failed Delivery"],Delivered:[],Cancelled:[],"Failed Delivery":[]};
-app.post("/api/shipments/:id/claim",auth,role("driver"),async(req,res)=>{
-  const gps=await DriverLocation.findOne({driverId:req.user._id});if(!gps||Date.now()-new Date(gps.recordedAt).getTime()>120000)return res.status(400).json({message:"Turn on your location before claiming a shipment"});
-  const s=await Shipment.findOne({_id:req.params.id,driverId:null,status:"Pending"});if(!s)return res.status(409).json({message:"This shipment is no longer available"});
-  s.driverId=req.user._id;s.status="Assigned";s.updatedAt=new Date();await s.save();
-  await ClaimRequest.create({shipmentId:s._id,driverId:req.user._id,status:"approved",handledAt:new Date()});
-  await Location.findOneAndUpdate({shipmentId:s._id},{shipmentId:s._id,driverId:req.user._id,latitude:gps.latitude,longitude:gps.longitude,accuracy:gps.accuracy,speed:gps.speed,recordedAt:new Date()},{upsert:true,new:true,setDefaultsOnInsert:true});
-  await History.create({shipmentId:s._id,status:"Assigned",note:"Driver claimed shipment. Admin notified.",changedBy:req.user._id});res.json({shipment:s,message:"Shipment claimed. Admin has been notified."});
+const tracking=()=> "LF-"+new Date().getFullYear()+"-"+crypto.randomBytes(4).toString("hex").toUpperCase();
+async function cleanupShipmentRecords(ids){
+  if(!ids.length)return;
+  await Promise.all([
+    History.deleteMany({shipmentId:{$in:ids}}),
+    Location.deleteMany({shipmentId:{$in:ids}}),
+    ClaimRequest.deleteMany({shipmentId:{$in:ids}}),
+    Shipment.deleteMany({_id:{$in:ids}})
+  ]);
+}
+async function deleteShipmentsForUser(userId){
+  const ids=(await Shipment.find({$or:[{customerId:userId},{driverId:userId}]}).select("_id")).map(x=>x._id);
+  await cleanupShipmentRecords(ids);
+  return ids.length;
+}
+async function cleanupOrphanedData(){
+  const [users,shipments]=await Promise.all([
+    User.find({}).select("_id role"),
+    Shipment.find({}).select("_id customerId driverId")
+  ]);
+  const userIds=users.map(u=>u._id);
+  const userSet=new Set(users.map(u=>String(u._id)));
+  const driverSet=new Set(users.filter(u=>u.role==="driver").map(u=>String(u._id)));
+  const orphanShipmentIds=shipments
+    .filter(s=>!s.customerId||!userSet.has(String(s.customerId)))
+    .map(s=>s._id);
+
+  if(orphanShipmentIds.length)await cleanupShipmentRecords(orphanShipmentIds);
+
+  const orphanSet=new Set(orphanShipmentIds.map(id=>String(id)));
+  const shipmentsWithInvalidDrivers=shipments
+    .filter(s=>!orphanSet.has(String(s._id))&&s.driverId&&!driverSet.has(String(s.driverId)))
+    .map(s=>s._id);
+
+  if(shipmentsWithInvalidDrivers.length){
+    await Shipment.updateMany(
+      {_id:{$in:shipmentsWithInvalidDrivers}},
+      {$set:{driverId:null,status:"Pending",updatedAt:new Date()}}
+    );
+  }
+
+  const driverIds=Array.from(driverSet);
+  const [historyResult,locationResult,claimResult,driverLocationResult]=await Promise.all([
+    History.deleteMany({shipmentId:{$nin:orphanShipmentIds.length?await Shipment.distinct("_id"):await Shipment.distinct("_id")}}),
+    Location.deleteMany({shipmentId:{$nin:orphanShipmentIds.length?await Shipment.distinct("_id"):await Shipment.distinct("_id")}}),
+    driverIds.length
+      ? ClaimRequest.deleteMany({$or:[{shipmentId:{$nin:await Shipment.distinct("_id")}},{driverId:{$nin:driverIds}}]})
+      : ClaimRequest.deleteMany({}),
+    DriverLocation.deleteMany({driverId:{$nin:userIds}})
+  ]);
+
+  const cleaned={
+    orphanShipments:orphanShipmentIds.length,
+    invalidShipmentDrivers:shipmentsWithInvalidDrivers.length,
+    orphanHistory:historyResult.deletedCount||0,
+    orphanLocations:locationResult.deletedCount||0,
+    orphanClaims:claimResult.deletedCount||0,
+    orphanDriverLocations:driverLocationResult.deletedCount||0
+  };
+  const total=Object.values(cleaned).reduce((a,b)=>a+b,0);
+  if(total)console.log("E-LOGS database cleanup:",cleaned);
+  return cleaned;
 });
 app.post("/api/shipments/:id/confirm-delivery",auth,role("customer"),async(req,res)=>{
   const s=await Shipment.findById(req.params.id);
@@ -32,6 +82,10 @@ app.post("/api/shipments/:id/confirm-delivery",auth,role("customer"),async(req,r
   res.json({shipment:s,message:"Receipt confirmed. Admin has been notified."});
 });
 app.patch("/api/shipments/:id/status",auth,role("driver","admin"),async(req,res)=>{const s=await Shipment.findById(req.params.id);if(!s)return res.status(404).json({message:"Shipment not found"});if(req.user.role==="driver"&&String(s.driverId)!==String(req.user._id))return res.status(403).json({message:"Only the assigned driver can update this shipment"});if(!next[s.status]?.includes(req.body.status))return res.status(400).json({message:"Invalid status transition"});s.status=req.body.status;s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:req.body.note||"Status updated",changedBy:req.user._id});res.json({shipment:s})});
+app.post("/api/admin/cleanup",auth,role("admin"),async(req,res)=>{
+  try{res.json({message:"Database cleanup complete",cleanup:await cleanupOrphanedData()})}
+  catch(e){res.status(500).json({message:"Database cleanup failed",error:e.message})}
+});
 app.get("/api/claims",auth,role("admin"),async(req,res)=>{const claims=await ClaimRequest.find({}).populate("driverId","name email phone isTestUser").populate({path:"shipmentId",populate:[{path:"customerId",select:"name email isTestUser"},{path:"driverId",select:"name email isTestUser"}]}).sort({createdAt:-1});const visible=claims.filter(c=>!c.driverId?.isTestUser&&!c.shipmentId?.customerId?.isTestUser&&!c.shipmentId?.driverId?.isTestUser);res.json({claims:visible})});
 app.patch("/api/shipments/:id/assign",auth,role("admin"),async(req,res)=>{const s=await Shipment.findById(req.params.id);if(!s)return res.status(404).json({message:"Shipment not found"});if(!req.body.driverId){s.driverId=null;if(["Assigned","Picked Up"].includes(s.status))s.status="Pending";s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:"Driver unassigned by admin",changedBy:req.user._id});return res.json({shipment:s,message:"Driver unassigned"})}const d=await User.findOne({_id:req.body.driverId,role:"driver",status:"active"});if(!d)return res.status(404).json({message:"Active driver not found"});s.driverId=d._id;if(s.status==="Pending")s.status="Assigned";s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:"Driver assigned by admin",changedBy:req.user._id});res.json({shipment:s,message:"Driver assigned"})});
 app.get("/api/users/:id/shipments",auth,role("admin"),async(req,res)=>{const u=await User.findById(req.params.id).select("name email role status");if(!u)return res.status(404).json({message:"User not found"});const filter=u.role==="driver"?{driverId:u._id}:{customerId:u._id};res.json({user:u,shipments:await Shipment.find(filter).populate("customerId","name email").populate("driverId","name email").sort({createdAt:-1})});});app.get("/api/users",auth,role("admin"),async(req,res)=>{
@@ -81,7 +135,10 @@ async function start(){
   if(!process.env.MONGODB_URI) throw new Error("MONGODB_URI is required");
   if(!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
   await mongoose.connect(process.env.MONGODB_URI);
-  await seedDemoUsers();await isolateObviousTestUsers();
+  await seedDemoUsers();
+  await isolateObviousTestUsers();
+  await cleanupOrphanedData();
+  setInterval(()=>cleanupOrphanedData().catch(e=>console.error("E-LOGS database cleanup failed:",e)),30000);
   app.listen(port,()=>console.log("LogisticsFav API running on "+port));
 }
 start().catch(e=>{console.error("LogisticsFav startup failed:",e);process.exit(1)});
