@@ -33,6 +33,7 @@ async function cleanupOrphanedData(){
   const userIds=users.map(u=>u._id);
   const userSet=new Set(users.map(u=>String(u._id)));
   const driverSet=new Set(users.filter(u=>u.role==="driver").map(u=>String(u._id)));
+
   const orphanShipmentIds=shipments
     .filter(s=>!s.customerId||!userSet.has(String(s.customerId)))
     .map(s=>s._id);
@@ -40,30 +41,33 @@ async function cleanupOrphanedData(){
   if(orphanShipmentIds.length)await cleanupShipmentRecords(orphanShipmentIds);
 
   const orphanSet=new Set(orphanShipmentIds.map(id=>String(id)));
-  const shipmentsWithInvalidDrivers=shipments
+  const invalidDriverShipmentIds=shipments
     .filter(s=>!orphanSet.has(String(s._id))&&s.driverId&&!driverSet.has(String(s.driverId)))
     .map(s=>s._id);
 
-  if(shipmentsWithInvalidDrivers.length){
+  if(invalidDriverShipmentIds.length){
     await Shipment.updateMany(
-      {_id:{$in:shipmentsWithInvalidDrivers}},
+      {_id:{$in:invalidDriverShipmentIds}},
       {$set:{driverId:null,status:"Pending",updatedAt:new Date()}}
     );
   }
 
+  const validShipmentIds=await Shipment.distinct("_id");
   const driverIds=Array.from(driverSet);
+  const claimFilter=driverIds.length
+    ? {$or:[{shipmentId:{$nin:validShipmentIds}},{driverId:{$nin:driverIds}}]}
+    : {};
+
   const [historyResult,locationResult,claimResult,driverLocationResult]=await Promise.all([
-    History.deleteMany({shipmentId:{$nin:orphanShipmentIds.length?await Shipment.distinct("_id"):await Shipment.distinct("_id")}}),
-    Location.deleteMany({shipmentId:{$nin:orphanShipmentIds.length?await Shipment.distinct("_id"):await Shipment.distinct("_id")}}),
-    driverIds.length
-      ? ClaimRequest.deleteMany({$or:[{shipmentId:{$nin:await Shipment.distinct("_id")}},{driverId:{$nin:driverIds}}]})
-      : ClaimRequest.deleteMany({}),
+    History.deleteMany({shipmentId:{$nin:validShipmentIds}}),
+    Location.deleteMany({shipmentId:{$nin:validShipmentIds}}),
+    ClaimRequest.deleteMany(claimFilter),
     DriverLocation.deleteMany({driverId:{$nin:userIds}})
   ]);
 
   const cleaned={
     orphanShipments:orphanShipmentIds.length,
-    invalidShipmentDrivers:shipmentsWithInvalidDrivers.length,
+    invalidShipmentDrivers:invalidDriverShipmentIds.length,
     orphanHistory:historyResult.deletedCount||0,
     orphanLocations:locationResult.deletedCount||0,
     orphanClaims:claimResult.deletedCount||0,
@@ -72,6 +76,61 @@ async function cleanupOrphanedData(){
   const total=Object.values(cleaned).reduce((a,b)=>a+b,0);
   if(total)console.log("E-LOGS database cleanup:",cleaned);
   return cleaned;
+}
+
+app.get("/api/shipments",auth,async(req,res)=>{
+  let f=req.user.role==="customer"
+    ?{customerId:req.user._id}
+    :req.user.role==="driver"
+      ?req.query.available==="true"
+        ?{driverId:null,status:"Pending"}
+        :req.query.assigned==="true"
+          ?{driverId:req.user._id,status:{$nin:["Delivered","Cancelled","Failed Delivery"]}}
+          :{driverId:req.user._id}
+      :{};
+  if(req.user.role==="admin"){
+    const hidden=(await User.find({isTestUser:true}).select("_id")).map(x=>x._id);
+    if(hidden.length)f={$and:[f,{$or:[{customerId:null},{customerId:{$nin:hidden}}]},{$or:[{driverId:null},{driverId:{$nin:hidden}}]}]};
+  }
+  res.json({shipments:await Shipment.find(f).populate("customerId","name email").populate("driverId","name email").sort({createdAt:-1})});
+});
+app.post("/api/shipments",auth,role("customer"),async(req,res)=>{
+  try{
+    const body={...req.body};
+    const textFields=["senderName","pickupAddress","receiverName","destinationAddress","packageDescription","category","priority","notes"];
+    for(const k of textFields)if(body[k]!=null)body[k]=String(body[k]).trim();
+    for(const k of ["senderPhone","receiverPhone"])if(body[k]!=null)body[k]=String(body[k]).replace(/[^0-9+]/g,"");
+    if(!["send_to_someone","order_for_myself"].includes(body.shipmentType))return res.status(400).json({message:"Choose whether this delivery is for someone else or for yourself"});
+    if(!body.senderName||!body.senderPhone||!body.pickupAddress||!body.receiverName||!body.receiverPhone||!body.destinationAddress||!body.packageDescription||!body.category)return res.status(400).json({message:"Please complete all required delivery information"});
+    if(body.weight!==""&&body.weight!=null){
+      const n=Number(body.weight);
+      if(!Number.isFinite(n)||n<0)return res.status(400).json({message:"Weight must be a valid number"});
+      body.weight=n;
+    }else body.weight=null;
+    let t=tracking();while(await Shipment.exists({trackingNumber:t}))t=tracking();
+    const s=await Shipment.create({...body,customerId:req.user._id,trackingNumber:t,status:"Pending"});
+    await History.create({shipmentId:s._id,status:"Pending",note:"Shipment created",changedBy:req.user._id});
+    res.status(201).json({shipment:s});
+  }catch(e){res.status(400).json({message:e.message})}
+});
+app.get("/api/shipments/:id",auth,async(req,res)=>{
+  const s=await Shipment.findById(req.params.id).populate("customerId","name email phone").populate("driverId","name email phone");
+  if(!s)return res.status(404).json({message:"Shipment not found"});
+  if(req.user.role==="customer"&&s.customerId._id.toString()!==req.user._id.toString())return res.status(403).json({message:"Forbidden"});
+  if(req.user.role==="driver"&&(!s.driverId||s.driverId._id.toString()!==req.user._id.toString()))return res.status(403).json({message:"Forbidden"});
+  res.json({shipment:{...s.toObject(),statusHistory:await History.find({shipmentId:s._id}).sort({createdAt:1}),latestLocation:await Location.findOne({shipmentId:s._id}).sort({recordedAt:-1})}});
+});
+const next={Pending:["Assigned","Cancelled"],Assigned:["Picked Up","Cancelled"],"Picked Up":["In Transit"],"In Transit":["Out for Delivery","Failed Delivery"],"Out for Delivery":["Delivered","Failed Delivery"],Delivered:[],Cancelled:[],"Failed Delivery":[]};
+app.post("/api/shipments/:id/claim",auth,role("driver"),async(req,res)=>{
+  const gps=await DriverLocation.findOne({driverId:req.user._id});
+  if(!gps||Date.now()-new Date(gps.recordedAt).getTime()>120000)return res.status(400).json({message:"Turn on your location before claiming a shipment"});
+  const s=await Shipment.findOne({_id:req.params.id,driverId:null,status:"Pending"});
+  if(!s)return res.status(409).json({message:"This shipment is no longer available"});
+  s.driverId=req.user._id;s.status="Assigned";s.updatedAt=new Date();await s.save();
+  await ClaimRequest.create({shipmentId:s._id,driverId:req.user._id,status:"approved",handledAt:new Date()});
+  await Location.findOneAndUpdate({shipmentId:s._id},{shipmentId:s._id,driverId:req.user._id,latitude:gps.latitude,longitude:gps.longitude,accuracy:gps.accuracy,speed:gps.speed,recordedAt:new Date()},{upsert:true,new:true,setDefaultsOnInsert:true});
+  await History.create({shipmentId:s._id,status:"Assigned",note:"Driver claimed shipment. Admin notified.",changedBy:req.user._id});
+  res.json({shipment:s,message:"Shipment claimed. Admin has been notified."});
 });
 app.post("/api/shipments/:id/confirm-delivery",auth,role("customer"),async(req,res)=>{
   const s=await Shipment.findById(req.params.id);
