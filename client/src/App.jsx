@@ -1,5 +1,5 @@
 import{useEffect,useState}from"react";import{Link,useNavigate,useParams,useLocation,Routes,Route,Navigate}from"react-router-dom";import{Package,Truck,MapPin,ShieldCheck,Plus,Search,LogOut,ArrowRight,CheckCircle2,Clock3,Users,PackageCheck}from"lucide-react";
-const API=(import.meta.env.VITE_API_URL||"/api").replace(/\\/$/,"");
+const API=(import.meta.env.VITE_API_URL||"/api").replace(/\/$/,"");
 const token=()=>localStorage.getItem("logistics_token");
 // One API helper keeps local development and the hosted frontend pointed at the same backend.
 async function api(path,opt={}){
