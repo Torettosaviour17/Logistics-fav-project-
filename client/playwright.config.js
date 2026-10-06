@@ -7,7 +7,7 @@ export default defineConfig({
   fullyParallel: false,
   reporter: [["list"], ["html", { outputFolder: "playwright-report", open: "never" }]],
   use: {
-    baseURL: process.env.BASE_URL || "https://logisticsfav-web.onrender.com",
+    baseURL: process.env.BASE_URL || "https://logisticsfav-web-app.onrender.com",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
