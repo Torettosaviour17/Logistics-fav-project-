@@ -1,13 +1,13 @@
 import "dotenv/config";import express from "express";import cors from "cors";import helmet from "helmet";import rateLimit from "express-rate-limit";import mongoose from "mongoose";import bcrypt from "bcryptjs";import jwt from "jsonwebtoken";import crypto from "crypto";
 const app=express();app.use(helmet());app.use(cors({origin:true,methods:["GET","POST","PATCH","PUT","DELETE","OPTIONS"],allowedHeaders:["Content-Type","Authorization"]}));app.use(express.json({limit:"1mb"}));app.use(rateLimit({windowMs:15*60*1000,max:300}));
-const User=mongoose.model("User",new mongoose.Schema({name:{type:String,required:true,trim:true},email:{type:String,required:true,unique:true,lowercase:true,trim:true},passwordHash:{type:String,required:true},role:{type:String,enum:["customer","driver","admin"],default:"customer"},phone:String,createdAt:{type:Date,default:Date.now}}));
+const User=mongoose.model("User",new mongoose.Schema({name:{type:String,required:true,trim:true},email:{type:String,required:true,unique:true,lowercase:true,trim:true},passwordHash:{type:String,required:true},role:{type:String,enum:["customer","driver","admin"],default:"customer"},status:{type:String,enum:["active","suspended"],default:"active"},isPrimaryAdmin:{type:Boolean,default:false},phone:String,createdAt:{type:Date,default:Date.now}}));
 const Shipment=mongoose.model("Shipment",new mongoose.Schema({trackingNumber:{type:String,unique:true,index:true},customerId:{type:mongoose.Schema.Types.ObjectId,ref:"User",required:true},driverId:{type:mongoose.Schema.Types.ObjectId,ref:"User",default:null},senderName:String,senderPhone:String,pickupAddress:String,receiverName:String,receiverPhone:String,destinationAddress:String,packageDescription:String,category:{type:String,default:"General"},weight:Number,priority:{type:String,default:"Standard"},notes:String,status:{type:String,default:"Pending"},createdAt:{type:Date,default:Date.now},updatedAt:{type:Date,default:Date.now}}));
 const History=mongoose.model("StatusHistory",new mongoose.Schema({shipmentId:mongoose.Schema.Types.ObjectId,status:String,note:String,changedBy:mongoose.Schema.Types.ObjectId,createdAt:{type:Date,default:Date.now}}));
 const Location=mongoose.model("Location",new mongoose.Schema({shipmentId:mongoose.Schema.Types.ObjectId,driverId:mongoose.Schema.Types.ObjectId,latitude:Number,longitude:Number,recordedAt:{type:Date,default:Date.now}}));
-const publicUser=u=>({id:u._id,name:u.name,email:u.email,role:u.role,phone:u.phone});const sign=u=>jwt.sign({userId:u._id.toString()},process.env.JWT_SECRET,{expiresIn:"7d"});const auth=async(req,res,next)=>{try{const h=req.headers.authorization||"";if(!h.startsWith("Bearer "))throw Error();const p=jwt.verify(h.slice(7),process.env.JWT_SECRET);req.user=await User.findById(p.userId).select("-passwordHash");if(!req.user)throw Error();next()}catch{res.status(401).json({message:"Authentication required"})}};const role=(...r)=>(req,res,next)=>r.includes(req.user.role)?next():res.status(403).json({message:"Forbidden"});
+const publicUser=u=>({id:u._id,name:u.name,email:u.email,role:u.role,status:u.status,isPrimaryAdmin:!!u.isPrimaryAdmin,phone:u.phone});const sign=u=>jwt.sign({userId:u._id.toString()},process.env.JWT_SECRET,{expiresIn:"7d"});const auth=async(req,res,next)=>{try{const h=req.headers.authorization||"";if(!h.startsWith("Bearer "))throw Error();const p=jwt.verify(h.slice(7),process.env.JWT_SECRET);req.user=await User.findById(p.userId).select("-passwordHash");if(!req.user)throw Error();next()}catch{res.status(401).json({message:"Authentication required"})}};const role=(...r)=>(req,res,next)=>r.includes(req.user.role)?next():res.status(403).json({message:"Forbidden"});
 app.get("/api/health",(req,res)=>res.json({status:"ok"}));
-app.post("/api/auth/register",async(req,res)=>{try{const{name,email,password,phone,role:requestedRole}=req.body;if(!name||!email||!password)return res.status(400).json({message:"Name, email and password are required"});if(password.length<8)return res.status(400).json({message:"Password must be at least 8 characters"});if(await User.exists({email}))return res.status(409).json({message:"Email already registered"});const role=requestedRole==="driver"?"driver":"customer";const u=await User.create({name,email,passwordHash:await bcrypt.hash(password,12),phone,role});res.status(201).json({token:sign(u),user:publicUser(u)})}catch(e){res.status(400).json({message:e.message})}});
-app.post("/api/auth/login",async(req,res)=>{const u=await User.findOne({email:req.body.email});if(!u||!(await bcrypt.compare(req.body.password||"",u.passwordHash)))return res.status(401).json({message:"Invalid email or password"});res.json({token:sign(u),user:publicUser(u)})});
+app.post("/api/auth/register",async(req,res)=>{try{const{name,email,password,phone,role:requestedRole}=req.body;if(!name||!email||!password)return res.status(400).json({message:"Name, email and password are required"});if(password.length<8)return res.status(400).json({message:"Password must be at least 8 characters"});if(await User.exists({email}))return res.status(409).json({message:"Email already registered"});const role=requestedRole==="driver"?"driver":"customer";const u=await User.create({name,email,passwordHash:await bcrypt.hash(password,12),phone,role,status:"active"});res.status(201).json({token:sign(u),user:publicUser(u)})}catch(e){res.status(400).json({message:e.message})}});
+app.post("/api/auth/login",async(req,res)=>{const u=await User.findOne({email:req.body.email});if(!u||!(await bcrypt.compare(req.body.password||"",u.passwordHash)))return res.status(401).json({message:"Invalid email or password"});if(u.status==="suspended")return res.status(403).json({message:"This account is suspended"});res.json({token:sign(u),user:publicUser(u)})});
 app.get("/api/auth/me",auth,(req,res)=>res.json({user:publicUser(req.user)}));
 const tracking=()=> "LF-"+new Date().getFullYear()+"-"+crypto.randomBytes(4).toString("hex").toUpperCase();
 app.get("/api/shipments",auth,async(req,res)=>{const f=req.user.role==="customer"?{customerId:req.user._id}:req.user.role==="driver"?{driverId:req.user._id}:{};res.json({shipments:await Shipment.find(f).populate("customerId","name email").populate("driverId","name email").sort({createdAt:-1})})});
@@ -15,8 +15,34 @@ app.post("/api/shipments",auth,role("customer"),async(req,res)=>{try{let t=track
 app.get("/api/shipments/:id",auth,async(req,res)=>{const s=await Shipment.findById(req.params.id).populate("customerId","name email phone").populate("driverId","name email phone");if(!s)return res.status(404).json({message:"Shipment not found"});if(req.user.role==="customer"&&s.customerId._id.toString()!==req.user._id.toString())return res.status(403).json({message:"Forbidden"});if(req.user.role==="driver"&&(!s.driverId||s.driverId._id.toString()!==req.user._id.toString()))return res.status(403).json({message:"Forbidden"});res.json({shipment:{...s.toObject(),statusHistory:await History.find({shipmentId:s._id}).sort({createdAt:1}),latestLocation:await Location.findOne({shipmentId:s._id}).sort({recordedAt:-1})}})});
 const next={Pending:["Assigned","Cancelled"],Assigned:["Picked Up","Cancelled"],"Picked Up":["In Transit"],"In Transit":["Out for Delivery","Failed Delivery"],"Out for Delivery":["Delivered","Failed Delivery"],Delivered:[],Cancelled:[],"Failed Delivery":[]};
 app.patch("/api/shipments/:id/status",auth,role("driver","admin"),async(req,res)=>{const s=await Shipment.findById(req.params.id);if(!s)return res.status(404).json({message:"Shipment not found"});if(req.user.role==="driver"&&String(s.driverId)!==String(req.user._id))return res.status(403).json({message:"Only the assigned driver can update this shipment"});if(!next[s.status]?.includes(req.body.status))return res.status(400).json({message:"Invalid status transition"});s.status=req.body.status;s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:req.body.note||"Status updated",changedBy:req.user._id});res.json({shipment:s})});
-app.patch("/api/shipments/:id/assign",auth,role("admin"),async(req,res)=>{const s=await Shipment.findById(req.params.id);const d=await User.findOne({_id:req.body.driverId,role:"driver"});if(!s||!d)return res.status(404).json({message:"Shipment or driver not found"});s.driverId=d._id;if(s.status==="Pending")s.status="Assigned";s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:"Driver assigned",changedBy:req.user._id});res.json({shipment:s})});
-app.get("/api/users/drivers",auth,role("admin"),async(req,res)=>res.json({users:await User.find({role:"driver"}).select("name email phone")}));
+app.patch("/api/shipments/:id/assign",auth,role("admin"),async(req,res)=>{const s=await Shipment.findById(req.params.id);const d=await User.findOne({_id:req.body.driverId,role:"driver",status:"active"});if(!s||!d)return res.status(404).json({message:"Shipment or driver not found"});s.driverId=d._id;if(s.status==="Pending")s.status="Assigned";s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:"Driver assigned",changedBy:req.user._id});res.json({shipment:s})});
+app.get("/api/users",auth,role("admin"),async(req,res)=>{
+  const users=await User.find({}).select("name email phone role status isPrimaryAdmin createdAt").sort({createdAt:1});
+  res.json({users});
+});
+app.get("/api/users/drivers",auth,role("admin"),async(req,res)=>res.json({users:await User.find({role:"driver"}).select("name email phone role status isPrimaryAdmin createdAt").sort({createdAt:1})}));
+app.patch("/api/users/:id/status",auth,role("admin"),async(req,res)=>{
+  const u=await User.findById(req.params.id);
+  if(!u)return res.status(404).json({message:"User not found"});
+  if(u.isPrimaryAdmin)return res.status(403).json({message:"The primary admin cannot be suspended"});
+  if(!["active","suspended"].includes(req.body.status))return res.status(400).json({message:"Invalid account status"});
+  u.status=req.body.status;await u.save();res.json({user:publicUser(u)});
+});
+app.patch("/api/users/:id/role",auth,role("admin"),async(req,res)=>{
+  const u=await User.findById(req.params.id);
+  if(!u)return res.status(404).json({message:"User not found"});
+  if(u.isPrimaryAdmin)return res.status(403).json({message:"The primary admin role cannot be changed"});
+  if(!["customer","driver","admin"].includes(req.body.role))return res.status(400).json({message:"Invalid role"});
+  u.role=req.body.role;u.status="active";await u.save();res.json({user:publicUser(u)});
+});
+app.delete("/api/users/:id",auth,role("admin"),async(req,res)=>{
+  const u=await User.findById(req.params.id);
+  if(!u)return res.status(404).json({message:"User not found"});
+  if(u.isPrimaryAdmin)return res.status(403).json({message:"The primary admin cannot be deleted"});
+  if(u.role==="customer" && await Shipment.exists({customerId:u._id}))return res.status(409).json({message:"This customer has shipment history. Suspend the account instead."});
+  if(u.role==="driver")await Shipment.updateMany({driverId:u._id},{$set:{driverId:null,status:"Pending"}});
+  await User.deleteOne({_id:u._id});res.json({message:"User deleted"});
+});
 app.post("/api/shipments/:id/location",auth,role("driver"),async(req,res)=>{const s=await Shipment.findById(req.params.id);if(!s||String(s.driverId)!==String(req.user._id))return res.status(403).json({message:"Forbidden"});const l=await Location.create({shipmentId:s._id,driverId:req.user._id,latitude:req.body.latitude,longitude:req.body.longitude});res.status(201).json({location:l})});
 app.get("/api/track/:trackingNumber",async(req,res)=>{const s=await Shipment.findOne({trackingNumber:req.params.trackingNumber}).populate("driverId","name");if(!s)return res.status(404).json({message:"Shipment not found"});res.json({shipment:{...s.toObject(),statusHistory:await History.find({shipmentId:s._id}).sort({createdAt:1}),latestLocation:await Location.findOne({shipmentId:s._id}).sort({recordedAt:-1})}})});
 app.use((req,res)=>res.status(404).json({message:"Route not found"}));
@@ -31,7 +57,7 @@ async function seedDemoUsers(){
   const passwordHash=await bcrypt.hash(password,12);
   await User.findOneAndUpdate(
     {email},
-    {name:"LogisticsFav Admin",email,passwordHash,role:"admin"},
+    {name:"LogisticsFav Admin",email,passwordHash,role:"admin",status:"active",isPrimaryAdmin:true},
     {upsert:true,new:true,setDefaultsOnInsert:true}
   );
 }
