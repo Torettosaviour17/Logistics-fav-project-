@@ -12,10 +12,10 @@ test.describe("LogisticsFav live application", () => {
     await expect(page.getByRole("heading", { name: /Move packages/i })).toBeVisible();
 
     await page.getByRole("link", { name: /Track/i }).last().click();
-    await expect(page).toHaveURL(/\/track$/);
+    await expect(page).toHaveURL(/#\/track$/);
     await expect(page.getByRole("heading", { name: /Where is your package/i })).toBeVisible();
 
-    await page.goto("/this-route-does-not-exist");
+    await page.goto("/#/this-route-does-not-exist");
     await expect(page.getByRole("heading", { name: /Page not found/i })).toBeVisible();
 
     expect(consoleErrors, "browser console errors").toEqual([]);
@@ -29,18 +29,18 @@ test.describe("LogisticsFav live application", () => {
     const email = "e2e+" + stamp + "@logisticsfav.demo";
     const password = "LogisticsFavE2E2026!";
     
-    await page.goto("/register");
+    await page.goto("/#/register");
     await page.locator("#auth-full-name").fill("Playwright Customer");
     await page.locator("#auth-email").fill(email);
     await page.locator("#auth-phone").fill("08000000000");
     await page.locator("#auth-password").fill(password);
     await page.getByRole("button", { name: /Create account/i }).click();
 
-    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(page).toHaveURL(/#\/dashboard$/);
     await expect(page.getByRole("heading", { name: /Welcome, Playwright/i })).toBeVisible();
 
     await page.getByRole("link", { name: /New shipment/i }).click();
-    await expect(page).toHaveURL(/\/shipments\/new$/);
+    await expect(page).toHaveURL(/#\/shipments\/new$/);
 
     await page.getByLabel("Sender name").fill("Playwright Sender");
     await page.getByLabel("Sender phone").fill("08111111111");
@@ -51,13 +51,13 @@ test.describe("LogisticsFav live application", () => {
     await page.getByLabel("Description").fill("E2E test package");
     await page.getByRole("button", { name: /Create shipment/i }).click();
 
-    await expect(page).toHaveURL(/\/shipments\//);
+    await expect(page).toHaveURL(/#\/shipments\//);
     const tracking = page.locator("p.text-xs.font-bold.text-teal-700").first();
     await expect(tracking).toBeVisible();
     const trackingNumber = await tracking.textContent();
     expect(trackingNumber).toMatch(/LF-/);
 
-    await page.goto("/track/" + encodeURIComponent(trackingNumber.trim()));
+    await page.goto("/#/track/" + encodeURIComponent(trackingNumber.trim()));
     await expect(page.getByRole("heading", { name: /Playwright Receiver/i })).toBeVisible();
     await expect(page.getByText("Pending", { exact: true }).first()).toBeVisible();
 
