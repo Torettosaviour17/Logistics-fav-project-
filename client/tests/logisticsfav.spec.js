@@ -11,7 +11,7 @@ test.describe("LogisticsFav live application", () => {
     await expect(page).toHaveTitle(/LogisticsFav/i);
     await expect(page.getByRole("heading", { name: /Move packages/i })).toBeVisible();
 
-    await page.getByRole("link", { name: /Track/i }).first().click();
+    await page.getByRole("link", { name: /Track/i }).last().click();
     await expect(page).toHaveURL(/\/track$/);
     await expect(page.getByRole("heading", { name: /Where is your package/i })).toBeVisible();
 
