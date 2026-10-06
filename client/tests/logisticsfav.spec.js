@@ -30,10 +30,10 @@ test.describe("LogisticsFav live application", () => {
     const password = "LogisticsFavE2E2026!";
     
     await page.goto("/register");
-    await page.getByLabel("Full name").fill("Playwright Customer");
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Phone").fill("08000000000");
-    await page.getByLabel("Password").fill(password);
+    await page.locator("#auth-full-name").fill("Playwright Customer");
+    await page.locator("#auth-email").fill(email);
+    await page.locator("#auth-phone").fill("08000000000");
+    await page.locator("#auth-password").fill(password);
     await page.getByRole("button", { name: /Create account/i }).click();
 
     await expect(page).toHaveURL(/\/dashboard$/);
