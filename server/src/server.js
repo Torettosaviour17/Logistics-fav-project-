@@ -13,11 +13,31 @@ const tracking=()=> "LF-"+new Date().getFullYear()+"-"+crypto.randomBytes(4).toS
 app.get("/api/shipments",auth,async(req,res)=>{const f=req.user.role==="customer"?{customerId:req.user._id}:req.user.role==="driver"?{driverId:req.user._id}:{};res.json({shipments:await Shipment.find(f).populate("customerId","name email").populate("driverId","name email").sort({createdAt:-1})})});
 app.post("/api/shipments",auth,role("customer"),async(req,res)=>{try{let t=tracking();while(await Shipment.exists({trackingNumber:t}))t=tracking();const s=await Shipment.create({...req.body,customerId:req.user._id,trackingNumber:t,status:"Pending"});await History.create({shipmentId:s._id,status:"Pending",note:"Shipment created",changedBy:req.user._id});res.status(201).json({shipment:s})}catch(e){res.status(400).json({message:e.message})}});
 app.get("/api/shipments/:id",auth,async(req,res)=>{const s=await Shipment.findById(req.params.id).populate("customerId","name email phone").populate("driverId","name email phone");if(!s)return res.status(404).json({message:"Shipment not found"});if(req.user.role==="customer"&&s.customerId._id.toString()!==req.user._id.toString())return res.status(403).json({message:"Forbidden"});if(req.user.role==="driver"&&(!s.driverId||s.driverId._id.toString()!==req.user._id.toString()))return res.status(403).json({message:"Forbidden"});res.json({shipment:{...s.toObject(),statusHistory:await History.find({shipmentId:s._id}).sort({createdAt:1}),latestLocation:await Location.findOne({shipmentId:s._id}).sort({recordedAt:-1})}})});
-const next={Pending:["Assigned","Cancelled"],Assigned:["Picked Up","Cancelled"],"Picked Up":["In Transit"],"In Transit:["Out for Delivery","Failed Delivery"],"Out for Delivery":["Delivered","Failed Delivery"],Delivered:[],Cancelled:[],"Failed Delivery":[]};
+const next={Pending:["Assigned","Cancelled"],Assigned:["Picked Up","Cancelled"],"Picked Up":["In Transit"],"In Transit":["Out for Delivery","Failed Delivery"],"Out for Delivery":["Delivered","Failed Delivery"],Delivered:[],Cancelled:[],"Failed Delivery":[]};
 app.patch("/api/shipments/:id/status",auth,role("driver","admin"),async(req,res)=>{const s=await Shipment.findById(req.params.id);if(!s)return res.status(404).json({message:"Shipment not found"});if(req.user.role==="driver"&&String(s.driverId)!==String(req.user._id))return res.status(403).json({message:"Only the assigned driver can update this shipment"});if(!next[s.status]?.includes(req.body.status))return res.status(400).json({message:"Invalid status transition"});s.status=req.body.status;s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:req.body.note||"Status updated",changedBy:req.user._id});res.json({shipment:s})});
 app.patch("/api/shipments/:id/assign",auth,role("admin"),async(req,res)=>{const s=await Shipment.findById(req.params.id);const d=await User.findOne({_id:req.body.driverId,role:"driver"});if(!s||!d)return res.status(404).json({message:"Shipment or driver not found"});s.driverId=d._id;if(s.status==="Pending")s.status="Assigned";s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:"Driver assigned",changedBy:req.user._id});res.json({shipment:s})});
 app.get("/api/users/drivers",auth,role("admin"),async(req,res)=>res.json({users:await User.find({role:"driver"}).select("name email phone")}));
 app.post("/api/shipments/:id/location",auth,role("driver"),async(req,res)=>{const s=await Shipment.findById(req.params.id);if(!s||String(s.driverId)!==String(req.user._id))return res.status(403).json({message:"Forbidden"});const l=await Location.create({shipmentId:s._id,driverId:req.user._id,latitude:req.body.latitude,longitude:req.body.longitude});res.status(201).json({location:l})});
 app.get("/api/track/:trackingNumber",async(req,res)=>{const s=await Shipment.findOne({trackingNumber:req.params.trackingNumber}).populate("driverId","name");if(!s)return res.status(404).json({message:"Shipment not found"});res.json({shipment:{...s.toObject(),statusHistory:await History.find({shipmentId:s._id}).sort({createdAt:1}),latestLocation:await Location.findOne({shipmentId:s._id}).sort({recordedAt:-1})}})});
 app.use((req,res)=>res.status(404).json({message:"Route not found"}));
-const port=process.env.PORT||5000;mongoose.connect(process.env.MONGODB_URI).then(()=>app.listen(port,()=>console.log("LogisticsFav API running on "+port))).catch(e=>{console.error(e);process.exit(1)});
+const port=process.env.PORT||5000;
+async function seedDemoUsers(){
+  // Defense/demo convenience: create the configured admin and driver accounts if they do not exist.
+  const demoUsers=[
+    {email:process.env.ADMIN_EMAIL,password:process.env.ADMIN_PASSWORD,role:"admin",name:"LogisticsFav Admin"},
+    {email:process.env.DRIVER_EMAIL,password:process.env.DRIVER_PASSWORD,role:"driver",name:"Demo Driver"}
+  ];
+  for(const d of demoUsers){
+    if(!d.email||!d.password||d.password.startsWith("replace-with-")) continue;
+    const exists=await User.exists({email:d.email});
+    if(!exists) await User.create({name:d.name,email:d.email,passwordHash:await bcrypt.hash(d.password,12),role:d.role});
+  }
+}
+async function start(){
+  if(!process.env.MONGODB_URI) throw new Error("MONGODB_URI is required");
+  if(!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
+  await mongoose.connect(process.env.MONGODB_URI);
+  await seedDemoUsers();
+  app.listen(port,()=>console.log("LogisticsFav API running on "+port));
+}
+start().catch(e=>{console.error("LogisticsFav startup failed:",e);process.exit(1)});
