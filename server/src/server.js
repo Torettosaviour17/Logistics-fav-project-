@@ -78,7 +78,7 @@ async function cleanupOrphanedData(){
   return cleaned;
 }
 
-app.get("/api/shipments",auth,async(req,res)=>{
+app.get("/api/shipments",auth,async(req,res)=>{\n  if(req.user.role==="admin")await syncUserVisibility();
   let f=req.user.role==="customer"
     ?{customerId:req.user._id}
     :req.user.role==="driver"
@@ -148,13 +148,24 @@ app.post("/api/admin/cleanup",auth,role("admin"),async(req,res)=>{
     res.json({message:"Database cleanup complete",cleanup:await cleanupOrphanedData(),testUsers})}
   catch(e){res.status(500).json({message:"Database cleanup failed",error:e.message})}
 });
-app.get("/api/claims",auth,role("admin"),async(req,res)=>{const claims=await ClaimRequest.find({}).populate("driverId","name email phone isTestUser").populate({path:"shipmentId",populate:[{path:"customerId",select:"name email isTestUser"},{path:"driverId",select:"name email isTestUser"}]}).sort({createdAt:-1});const visible=claims.filter(c=>!c.driverId?.isTestUser&&!c.shipmentId?.customerId?.isTestUser&&!c.shipmentId?.driverId?.isTestUser);res.json({claims:visible})});
+app.get("/api/claims",auth,role("admin"),async(req,res)=>{\n  await syncUserVisibility();const claims=await ClaimRequest.find({}).populate("driverId","name email phone isTestUser").populate({path:"shipmentId",populate:[{path:"customerId",select:"name email isTestUser"},{path:"driverId",select:"name email isTestUser"}]}).sort({createdAt:-1});const visible=claims.filter(c=>!c.driverId?.isTestUser&&!c.shipmentId?.customerId?.isTestUser&&!c.shipmentId?.driverId?.isTestUser);res.json({claims:visible})});
 app.patch("/api/shipments/:id/assign",auth,role("admin"),async(req,res)=>{const s=await Shipment.findById(req.params.id);if(!s)return res.status(404).json({message:"Shipment not found"});if(!req.body.driverId){s.driverId=null;if(["Assigned","Picked Up"].includes(s.status))s.status="Pending";s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:"Driver unassigned by admin",changedBy:req.user._id});return res.json({shipment:s,message:"Driver unassigned"})}const d=await User.findOne({_id:req.body.driverId,role:"driver",status:"active",isTestUser:{$ne:true}});if(!d)return res.status(404).json({message:"Active driver not found"});s.driverId=d._id;if(s.status==="Pending")s.status="Assigned";s.updatedAt=new Date();await s.save();await History.create({shipmentId:s._id,status:s.status,note:"Driver assigned by admin",changedBy:req.user._id});res.json({shipment:s,message:"Driver assigned"})});
-app.get("/api/users/:id/shipments",auth,role("admin"),async(req,res)=>{const u=await User.findById(req.params.id).select("name email role status isTestUser");if(!u||u.isTestUser)return res.status(404).json({message:"User not found"});const filter=u.role==="driver"?{driverId:u._id}:{customerId:u._id};res.json({user:u,shipments:await Shipment.find(filter).populate("customerId","name email").populate("driverId","name email").sort({createdAt:-1})});});app.get("/api/users",auth,role("admin"),async(req,res)=>{
+app.get("/api/users/:id/shipments",auth,role("admin"),async(req,res)=>{\n  await syncUserVisibility();const u=await User.findById(req.params.id).select("name email role status isTestUser");if(!u||u.isTestUser)return res.status(404).json({message:"User not found"});const filter=u.role==="driver"?{driverId:u._id}:{customerId:u._id};res.json({user:u,shipments:await Shipment.find(filter).populate("customerId","name email").populate("driverId","name email").sort({createdAt:-1})});});app.get("/api/users",auth,role("admin"),async(req,res)=>{\n  await syncUserVisibility();
   const includeTest=req.query.includeTest==="true";const users=await User.find(includeTest?{}:{isTestUser:{$ne:true}}).select("name email phone role status isPrimaryAdmin isTestUser createdAt").sort({createdAt:1});
   res.json({users});
 });
-app.get("/api/users/drivers",auth,role("admin"),async(req,res)=>res.json({users:await User.find({role:"driver",isTestUser:{$ne:true}}).select("name email phone role status isPrimaryAdmin createdAt").sort({createdAt:1})}));
+app.get("/api/users/drivers",auth,role("admin"),async(req,res)=>{\n  await syncUserVisibility();\n  return res.json({users:await User.find({role:"driver",isTestUser:{$ne:true}}).select("name email phone role status isPrimaryAdmin createdAt").sort({createdAt:1})}));
+app.post("/api/admin/sync-users",auth,role("admin"),async(req,res)=>{
+  try{
+    await syncUserVisibility();
+    const [total,visible,testUsers]=await Promise.all([
+      User.countDocuments({}),
+      User.countDocuments({isTestUser:{$ne:true}}),
+      User.countDocuments({isTestUser:true})
+    ]);
+    res.json({message:"User visibility synchronized",totalUsers:total,visibleUsers:visible,testUsers});
+  }catch(e){res.status(500).json({message:"User visibility sync failed",error:e.message})}
+});
 app.patch("/api/users/:id/status",auth,role("admin"),async(req,res)=>{
   const u=await User.findById(req.params.id);
   if(!u)return res.status(404).json({message:"User not found"});
@@ -185,12 +196,20 @@ const isTestNameOrEmail=(u)=>{
   const v=(String(u.name||"")+" "+String(u.email||"")).toLowerCase();
   return /\bplay[\s._-]*week\b|\bgit[\s._-]*tester\b|\bgithub[\s._-]*tester\b/.test(v);
 };
-async function resetLegacyTestUserFlags(){
-  // Older versions classified generic words such as "test", "demo" and "qa" as test data.
-  // Only explicit Play Week/Git tester accounts should remain hidden from the admin UI.
-  await User.updateMany({isTestUser:true},{$set:{isTestUser:false}});
-}
 async function isolateObviousTestUsers(){
+  const candidates=await User.find({isTestUser:{$ne:true}}).select("_id name email isPrimaryAdmin");
+  const ids=candidates.filter(u=>!u.isPrimaryAdmin&&isTestNameOrEmail(u)).map(u=>u._id);
+  if(ids.length)await User.updateMany({_id:{$in:ids}},{$set:{isTestUser:true}});
+}
+async function syncUserVisibility(){
+  // Reconcile the stored visibility flag from the database before admin data is returned.
+  // Only explicit Play Week/Git tester accounts stay hidden.
+  await User.updateMany({isTestUser:true},{$set:{isTestUser:false}});
+  await isolateObviousTestUsers();
+}
+async function resetLegacyTestUserFlags(){
+  await syncUserVisibility();
+}
   const candidates=await User.find({isTestUser:{$ne:true}}).select("_id name email isPrimaryAdmin");
   const ids=candidates.filter(u=>!u.isPrimaryAdmin&&isTestNameOrEmail(u)).map(u=>u._id);
   if(ids.length)await User.updateMany({_id:{$in:ids}},{$set:{isTestUser:true}});
