@@ -7,7 +7,7 @@ const Location=mongoose.model("Location",new mongoose.Schema({shipmentId:mongoos
 const ClaimRequest=mongoose.model("ClaimRequest",new mongoose.Schema({shipmentId:{type:mongoose.Schema.Types.ObjectId,ref:"Shipment",required:true},driverId:{type:mongoose.Schema.Types.ObjectId,ref:"User",required:true},status:{type:String,enum:["pending","approved","rejected"],default:"approved"},createdAt:{type:Date,default:Date.now},handledAt:Date}));
 const publicUser=u=>({id:u._id,name:u.name,email:u.email,role:u.role,status:u.status,isPrimaryAdmin:!!u.isPrimaryAdmin,isTestUser:!!u.isTestUser,phone:u.phone});const sign=u=>jwt.sign({userId:u._id.toString()},process.env.JWT_SECRET,{expiresIn:"7d"});const auth=async(req,res,next)=>{try{const h=req.headers.authorization||"";if(!h.startsWith("Bearer "))throw Error();const p=jwt.verify(h.slice(7),process.env.JWT_SECRET);req.user=await User.findById(p.userId).select("-passwordHash");if(!req.user)throw Error();if(req.user.status==="suspended")return res.status(403).json({message:"This account is suspended"});next()}catch{res.status(401).json({message:"Authentication required"})}};const role=(...r)=>(req,res,next)=>r.includes(req.user.role)?next():res.status(403).json({message:"Forbidden"});
 app.get("/api/health",(req,res)=>res.json({status:"ok"}));
-app.post("/api/auth/register",async(req,res)=>{try{const{name,email,password,phone,role:requestedRole}=req.body;const testText=(String(name||"")+" "+String(email||"")).toLowerCase();const isTestUser=/test|demo|dummy|sandbox|qa|playweek/.test(testText);if(!name||!email||!password)return res.status(400).json({message:"Name, email and password are required"});if(password.length<8)return res.status(400).json({message:"Password must be at least 8 characters"});if(await User.exists({email}))return res.status(409).json({message:"Email already registered"});const role=requestedRole==="driver"?"driver":"customer";const u=await User.create({name,email,passwordHash:await bcrypt.hash(password,12),phone,role,status:"active",isTestUser});res.status(201).json({token:sign(u),user:publicUser(u)})}catch(e){res.status(400).json({message:e.message})}});
+app.post("/api/auth/register",async(req,res)=>{try{const{name,email,password,phone,role:requestedRole}=req.body;const testText=(String(name||"")+" "+String(email||"")).toLowerCase();const isTestUser=/\bplay[\s._-]*week\b|\bgit[\s._-]*tester\b|\bgithub[\s._-]*tester\b/.test(testText);if(!name||!email||!password)return res.status(400).json({message:"Name, email and password are required"});if(password.length<8)return res.status(400).json({message:"Password must be at least 8 characters"});if(await User.exists({email}))return res.status(409).json({message:"Email already registered"});const role=requestedRole==="driver"?"driver":"customer";const u=await User.create({name,email,passwordHash:await bcrypt.hash(password,12),phone,role,status:"active",isTestUser});res.status(201).json({token:sign(u),user:publicUser(u)})}catch(e){res.status(400).json({message:e.message})}});
 app.post("/api/auth/login",async(req,res)=>{const email=String(req.body.email||"").trim().toLowerCase();const u=await User.findOne({email});if(!u||!(await bcrypt.compare(req.body.password||"",u.passwordHash)))return res.status(401).json({message:"Invalid email or password"});if(u.status==="suspended")return res.status(403).json({message:"This account is suspended"});res.json({token:sign(u),user:publicUser(u)})});
 app.get("/api/auth/me",auth,(req,res)=>res.json({user:publicUser(req.user)}));
 const tracking=()=> "LF-"+new Date().getFullYear()+"-"+crypto.randomBytes(4).toString("hex").toUpperCase();
@@ -183,8 +183,13 @@ const port=process.env.PORT||5000;
 const MAX_TEST_USERS=5;
 const isTestNameOrEmail=(u)=>{
   const v=(String(u.name||"")+" "+String(u.email||"")).toLowerCase();
-  return /test|demo|dummy|sandbox|qa|playweek/.test(v);
+  return /\bplay[\s._-]*week\b|\bgit[\s._-]*tester\b|\bgithub[\s._-]*tester\b/.test(v);
 };
+async function resetLegacyTestUserFlags(){
+  // Older versions classified generic words such as "test", "demo" and "qa" as test data.
+  // Only explicit Play Week/Git tester accounts should remain hidden from the admin UI.
+  await User.updateMany({isTestUser:true},{$set:{isTestUser:false}});
+}
 async function isolateObviousTestUsers(){
   const candidates=await User.find({isTestUser:{$ne:true}}).select("_id name email isPrimaryAdmin");
   const ids=candidates.filter(u=>!u.isPrimaryAdmin&&isTestNameOrEmail(u)).map(u=>u._id);
@@ -224,6 +229,7 @@ async function start(){
   if(!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
   await mongoose.connect(process.env.MONGODB_URI);
   await seedDemoUsers();
+  await resetLegacyTestUserFlags();
   await isolateObviousTestUsers();
   await enforceTestUserLimit();
   await cleanupOrphanedData();
