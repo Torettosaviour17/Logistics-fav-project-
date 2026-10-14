@@ -40,3 +40,28 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 @media(max-width:640px){.hero-section .hero-float{animation:none}.hero-orb-one{right:-180px}.site-footer{margin-top:3rem}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}.motion-card:hover,.workflow-step:hover,.footer-link:hover{transform:none}}
 @layer components{.card{@apply rounded-2xl border border-slate-200 bg-white shadow-sm}.btn{@apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 font-semibold transition}.primary{@apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 font-semibold}.secondary{@apply inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-semibold text-slate-700}.input{@apply w-full rounded-xl border border-slate-300 px-3.5 py-3 outline-none}.label{@apply mb-1.5 block text-sm font-medium text-slate-700}}
+/* Responsive layout fixes: prevent the application shell and controls from widening mobile screens. */
+html,body,#root{width:100%;max-width:100%;min-width:0}
+body{overflow-x:hidden}
+.site-shell{width:100%;max-width:100%;overflow-x:clip}
+main,section,article,form{min-width:0}
+img,svg,video,canvas{max-width:100%}
+input,select,textarea{min-width:0;max-width:100%}
+button,.primary,.secondary{max-width:100%;white-space:normal}
+@media(max-width:640px){
+  html{scroll-padding-top:64px}
+  .site-header .brand-mark{box-shadow:none}
+  .site-header nav{gap:2px}
+  .site-header nav a,.site-header nav button{font-size:11px;line-height:1.15}
+  .site-header nav .primary,.site-header nav .secondary{padding:7px 8px!important;border-radius:9px!important}
+  .site-header nav svg{width:13px;height:13px}
+  main.mx-auto{padding-left:12px;padding-right:12px}
+  h1.text-5xl{font-size:2rem;line-height:1.15}
+  h1.text-4xl{font-size:1.8rem;line-height:1.18}
+  .input{padding:10px 11px;font-size:14px}
+  .label{font-size:12px;margin-bottom:5px}
+  .primary,.secondary{gap:6px}
+  .card{border-radius:16px}
+  .motion-card:hover,.workflow-step:hover,.feature-card:hover{transform:none}
+}
+@media(prefers-reduced-motion:reduce){.hero-orb-one,.hero-orb-two,.animate-fade-up,.hero-float{animation:none!important}}
